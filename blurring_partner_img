@@ -1,0 +1,42 @@
+import numpy as np
+import cv2 as cv
+from matplotlib import pyplot as plt
+import os
+import PIL
+
+script_dir = os.path.dirname(__file__)
+SCRIPT_DIR = os.path.abspath(script_dir)
+img =  os.path.join(SCRIPT_DIR, "partner.JPG")
+
+img = cv.imread(img)
+median_blur = cv.medianBlur(img, 251)
+gaussian_blur = cv.GaussianBlur(img, (251, 251), 0)
+average_blur = cv.blur(img, (250, 250))
+bilateral_blur = cv.bilateralFilter(img, 15, 75, 75)
+
+# #original image
+# plt.subplot(121), plt.imshow(cv.cvtColor(img, cv.COLOR_BGR2RGB)), plt.title('Original Image')
+# plt.axis('off') 
+
+# #median blur
+# plt.subplot(121), plt.imshow(cv.cvtColor(median_blur, cv.COLOR_BGR2RGB)), plt.title('Median Blurred Image')
+# plt.axis('off') 
+
+# #gaussian blur
+# plt.subplot(122), plt.imshow(cv.cvtColor(gaussian_blur, cv.COLOR_BGR2RGB)), plt.title('Gaussian Blurred Image')
+# plt.axis('off')
+
+# #average blur
+# plt.subplot(122), plt.imshow(cv.cvtColor(average_blur, cv.COLOR_BGR2RGB)), plt.title('Average Blurred Image')
+# plt.axis('off')
+
+# #bilateral blur
+# plt.subplot(122), plt.imshow(cv.cvtColor(bilateral_blur, cv.COLOR_BGR2RGB)), plt.title('Bilateral Blurred Image')
+# plt.axis('off')
+
+
+# plt.show()
+
+average_blur_path = os.path.join(SCRIPT_DIR, "average_blurred_partner.JPG")
+cv.imwrite(average_blur_path, average_blur) 
+

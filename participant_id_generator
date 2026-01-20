@@ -1,0 +1,9 @@
+import random
+
+def generate_participant_id():
+    """Generate a random 3-digit participant ID."""
+    return random.randint(100, 999)
+
+# Generate and print a participant ID
+participant_id = generate_participant_id()
+print(f"Participant ID: {participant_id}")
