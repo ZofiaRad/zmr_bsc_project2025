@@ -26,7 +26,7 @@ pacman::p_load(tidyverse,
 
 #Loadin in the csv files
 ```{r}
-behavioural_data <- list.files(path = "/Users/zofiaradwanska/Desktop/BScThesis/analysis/experiment_data/behavioural_data", full.names = TRUE) %>% 
+behavioural_data <- list.files(path = "../analysis/experiment_data/behavioural_data", full.names = TRUE) %>% 
   lapply(read_csv) %>%
   bind_rows
 ```
