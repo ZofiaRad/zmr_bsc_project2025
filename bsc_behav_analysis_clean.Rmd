@@ -1,0 +1,534 @@
+---
+title: "bsc_behav_analysis"
+author: "Zofia Radwańska"
+date: "2025-12-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Loading packages
+```{r}
+library(pacman)
+pacman::p_load(tidyverse,
+               lme4,
+               readr,
+               dplyr,
+               lmerTest,
+               performance,
+               moments,
+               glmmTMB, flexmix, retimes, brms, emmeans, effectsize, ggplot
+               )
+
+```
+
+#Loadin in the csv files
+```{r}
+behavioural_data <- list.files(path = "/Users/zofiaradwanska/Desktop/BScThesis/analysis/experiment_data/behavioural_data", full.names = TRUE) %>% 
+  lapply(read_csv) %>%
+  bind_rows
+```
+
+#Preprocessing
+```{r}
+#new column for coding the conditions
+behavioural_data <- behavioural_data %>% 
+  mutate(condition = case_when(
+         social == "non_social" & uncertainty == "certain" & interaction == "no_go" ~ "ns_c_nogo",
+         social == "non_social" & uncertainty == "low" & interaction == "no_go" ~ "ns_l_nogo",
+         social == "non_social" & uncertainty == "high" & interaction == "no_go" ~ "ns_h_nogo",
+         social == "non_social" & uncertainty == "certain" & interaction == "go" ~ "ns_c_go",
+         social == "non_social" & uncertainty == "low" & interaction == "go" ~ "ns_l_go",
+         social == "non_social" & uncertainty == "high" & interaction == "go" ~ "ns_h_go",
+         social == "social" & uncertainty == "certain" & interaction == "no_go" ~ "s_c_nogo",
+         social == "social" & uncertainty == "low" & interaction == "no_go" ~ "s_l_nogo",
+         social == "social" & uncertainty == "high" & interaction == "no_go" ~ "s_h_nogo",
+         social == "social" & uncertainty == "certain" & interaction == "go" ~ "s_c_go",
+         social == "social" & uncertainty == "low" & interaction == "go" ~ "s_l_go",
+         social == "social" & uncertainty == "high" & interaction == "go" ~ "s_h_go",
+  ))
+
+#new df with only usefull columns
+selected_columns = c("participant_id", "social", "uncertainty", "interaction", "condition", "trial_n_in_block", "block_n", "rt", "approach_t", "drag_t", "mt", "success", "green_circle_positions", "target_circle_index")
+
+df <- subset(behavioural_data, select = selected_columns)
+
+#removal of practice trial
+df <- subset(df, df$block_n != 0)
+
+#exclusion of nogo condition
+df <- subset(df, df$interaction != "no_go")
+
+#change of sec into ms
+df <- df %>% 
+  mutate(rt = rt * 1000,
+         approach_t = approach_t * 1000,
+         mt = mt * 1000,
+         drag_t = drag_t * 1000)
+
+#factorizing the variables
+sapply(df, class)
+
+df <- df %>% 
+  mutate(
+    participant_id = factor(participant_id),
+    social = factor(social),
+    undertainty = factor(uncertainty),
+    #uncertinty = factor(uncertainty, ordered = TRUE, 
+    #                            levels = c("certain", "low", "high")), #ordering the factors from lowest to highest uncertainty levels
+    interaction = factor(interaction),
+    condition = factor(condition),
+    block_n = factor(block_n),
+    trial_n_in_block = factor(trial_n_in_block)
+    #target_circle_index = factor(target_circle_index, ordered = TRUE, levels = c(1, 2, 3, 4, 5))
+  )
+
+```
+
+#Removal of outliers
+```{r}
+#identification of extreme values (outliers)
+outliers <- df %>%
+  group_by(participant_id, condition) %>%
+  filter(rt < quantile(rt, 0.25, na.rm = TRUE) - 1.5 * IQR(rt, na.rm = TRUE) |
+         rt > quantile(rt, 0.75, na.rm = TRUE) + 1.5 * IQR(rt, na.rm = TRUE))
+print(outliers) #36 outliers identifies
+
+#removal of outliers
+cleaned_data <- df %>%
+  anti_join(outliers, by = c("participant_id", "condition", "rt")) #564 data points kept
+
+```
+
+#Visualisation of the DV distribution
+```{r}
+
+#max(behavioural_data$rt) #NAs have to be removed
+
+#distribution of raw rts
+ggplot(df, aes(x = rt)) +
+  geom_density()
+ggplot(cleaned_data, aes(x = rt)) +
+  geom_density()
+
+#distribution by condition
+ggplot(df, aes(x = social, y = rt)) +
+  geom_violin()
+ggplot(cleaned_data, aes(x = social, y = rt)) +
+  geom_violin()
+
+ggplot(cleaned_data, aes(x = condition, y = rt)) +
+  geom_violin() 
+
+#distribution by participant
+ggplot(cleaned_data, aes(x = participant_id, y = rt)) +
+  geom_violin() 
+
+#uncertainty
+ggplot(cleaned_data, aes(x = uncertainty, y = rt, color = uncertainty)) +
+  geom_violin() +
+  facet_wrap(~ participant_id)
+ggsave("uncertainty_p_rt_dist.png")
+
+#social
+ggplot(cleaned_data, aes(x = social, y = rt, color = social)) +
+  geom_violin() +
+  facet_wrap(~ participant_id)
+ggsave("social_p_rt_dist.png")
+```
+
+```{r}
+#summary statistics
+df_clean_summary <- cleaned_data %>%
+  group_by(participant_id, condition, social, uncertainty, interaction) %>%
+  summarize(
+    mean_tempo = mean(rt, na.rm = TRUE),
+    median_tempo = median(rt, na.rm = TRUE),
+    min_tempo = min(rt, na.rm = TRUE),
+    max_tempo = max(rt, na.rm = TRUE),
+    sd_tempo = sd(rt, na.rm = TRUE),
+    skewness = skewness(rt, na.rm = TRUE),
+    kurtosis = kurtosis(rt, na.rm = TRUE),
+    .groups = "drop"  # removes all standard grouping 
+  )
+
+rt_stats <- data %>% 
+  summarise(
+    mean = mean(rt),
+    median = median(rt),
+    sd = sd(rt),
+    skewness = skewness(rt),
+    kurtosis = kurtosis(rt))
+         
+```
+
+#Participant statistics
+```{r}
+#age stats
+mean_age = mean(behavioural_data$age)
+print(paste("Mean age:", mean_age))
+
+sd_age = sd(behavioural_data$age)
+print(paste("sd age:", sd_age))
+
+age <- behavioural_data %>% group_by(participant_id) %>% summarise(age = first(age))
+
+#total number of languages + additional lowercasing of them
+behavioural_data$native_language <- tolower(behavioural_data$native_language)
+nr_lang = length(unique(tolower(behavioural_data$native_language)))
+print(paste("Number of L1:", nr_lang))
+
+#new df with only ID and l1
+df_w_lang <- behavioural_data %>% group_by(participant_id) %>% summarise(native_language = first(native_language))
+print(df_w_lang)
+
+#counting how many speakers there are of each language
+nr_speaker <- df_w_lang %>% group_by (native_language) %>% summarise(count = n())
+nr_speaker
+
+#separating gender
+df_gend <- behavioural_data %>% group_by(participant_id) %>% summarise(gender = first(gender))
+
+#counting genders 
+nr_gend <- df_gend %>% group_by(gender) %>% summarise(count = n())
+nr_gend
+
+#handedness
+nr_hand <- behavioural_data %>% group_by(participant_id) %>% summarise(handedness = first(handedness))
+
+```
+
+#Trial duration analysis
+```{r}
+#calculate trial durations (difference between fixation onset between trials)
+trial_durations <- behavioural_data %>%
+  filter(block_n != 0) %>% #exclude practice trials
+  
+  #sort by participant, block, and trial number
+  arrange(participant_id, block_n, trial_n_in_block) %>%
+  
+  #group by participant and block
+  group_by(participant_id, block_n) %>%
+  
+  #duration calculation
+  mutate(
+    trial_duration = lead(fix_start_time) - fix_start_time
+  ) %>%
+  
+  #remove last trial from each block (lack of following trial)
+  filter(!is.na(trial_duration)) %>%
+  
+  ungroup()
+
+#mean trial duration across all trials
+overall_mean_duration <- mean(trial_durations$trial_duration, na.rm = TRUE)
+overall_sd_duration <- sd(trial_durations$trial_duration, na.rm = TRUE)
+
+overall_mean_duration
+overall_sd_duration
+
+#mean duration by participant
+by_participant <- trial_durations %>%
+  group_by(participant_id) %>%
+  summarise(
+    mean_trial_duration = mean(trial_duration, na.rm = TRUE),
+    sd_trial_duration = sd(trial_duration, na.rm = TRUE),
+    n_trials = n()
+  )
+
+by_participant
+
+#mean duration by condition
+by_condition <- trial_durations %>%
+  group_by(social, uncertainty, interaction) %>%
+  summarise(
+    mean_trial_duration = mean(trial_duration, na.rm = TRUE),
+    sd_trial_duration = sd(trial_duration, na.rm = TRUE),
+    n_trials = n()
+  ) %>%
+  ungroup()
+
+by_condition
+
+```
+
+
+# DATA ANALYSIS
+
+
+1. rt transformation
+2. LMM
+3. post-hoc testing
+
+##Transformed RTs
+```{r}
+data <- cleaned_data
+
+ggplot(data, aes(x = rt)) +
+  geom_density()
+
+
+data$log_rt <- log(data$rt)
+ggplot(data, aes(x = log_rt)) +
+  geom_density()
+
+data$sqr_rt <- sqrt(data$rt)
+ggplot(data, aes(x = sqr_rt)) +
+  geom_density()
+
+data$invert_rt <- 1 / data$rt
+
+```
+
+#Linear Mixed Effects Model
+```{r}
+model <- lmer(rt ~ social * uncertainty + (1 | participant_id) + (1 | block_n), data)
+summary(model)
+anova(model)
+
+#log transformed rt
+model_log <- lmer(log_rt ~ social * uncertainty + (1 | participant_id) + (1 | block_n), data)
+summary(model_log)
+anova(model_log)
+
+model_log2 <- lmer(log_rt ~ social * uncertainty + (1 | participant_id), data)
+summary(model_log2)
+anova(model_log2)
+
+#square root transformed rt
+model_sqr <- lmer(sqr_rt ~ social * uncertainty + (1 | participant_id) + (1 | block_n), data)
+summary(model_sqr)
+
+#inverted rt
+model_invert <- lmer(invert_rt ~ social * uncertainty + (1 | participant_id) + (1 | block_n), data)
+summary(model_invert)
+
+#simplified model
+model_simple <- lmer(log_rt ~ uncertainty + (1 | participant_id), data)
+summary(model_simple)
+anova(model_simple)
+
+
+#model comparison
+AIC(model_log)
+AIC(model_log2)
+AIC(model_simple)
+
+BIC(model_log)
+BIC(model_log2)
+BIC(model_simple)
+```
+
+
+##Assumption testing
+```{r}
+#RAW Model
+##normality
+qqnorm(resid(model))
+qqline(resid(model))
+
+##homoscedasticity
+plot(model)
+
+##homogeneity of variance
+plot(model.lme)
+
+qqnorm(model, ~ranef(., level=2))
+
+check_model(model)
+
+#LOG TRANSFORMED model
+qqnorm(resid(model_log))
+qqline(resid(model_log))
+
+check_model(model_log)
+
+#INVERTED rt
+check_model(model_invert)
+```
+
+#Exploratory analysis - approach time
+```{r}
+#calculate circle positions
+calculate_circle_positions <- function(num_circles = 5, spacing = 3, y_pos = 0) {
+  total_width <- (num_circles - 1) * spacing
+  start_x <- -total_width / 2
+  
+  circle_positions <- data.frame(
+    circle_index = 0:(num_circles - 1),
+    x = start_x + (0:(num_circles - 1)) * spacing,
+    y = y_pos
+  )
+  
+  return(circle_positions)
+}
+
+circle_positions <- calculate_circle_positions()
+
+
+#start and end positions for participant movement (participant loc)
+start_x <- 0
+start_y <- -3.1
+target_x <- 0
+target_y <- -3.1
+
+#add distance calculations to the data
+data <- data %>%
+  dplyr::left_join(circle_positions, by = c("target_circle_index" = "circle_index")) %>%
+  dplyr::mutate(
+    distance_approach = sqrt((x - start_x)^2 + (y - start_y)^2),
+    distance_return = sqrt((target_x - x)^2 + (target_y - y)^2),
+    distance_total = distance_approach + distance_return
+  )
+
+#distance for each circle
+circle_distances <- data %>%
+  select(target_circle_index, x, y, distance_approach, distance_return, distance_total) %>%
+  distinct() %>%
+  arrange(target_circle_index)
+
+print(circle_distances)
+
+```
+
+```{r}
+#lmm for approach time with distance to target as covariate
+model_approach <- lmer(
+  approach_t ~ social * uncertainty + distance_approach + (1 | participant_id), 
+  data = data
+)
+summary(model_approach)
+
+
+#model rt variability
+rt_variability <- data %>%
+  group_by(participant_id, social, uncertainty) %>%
+  summarise(
+    sd_rt = sd(log_rt, na.rm = TRUE),
+    cv_rt = sd(log_rt, na.rm = TRUE) / mean(log_rt, na.rm = TRUE)) # coefficient of variation
+
+model_cv <- lmer(cv_rt ~ social * uncertainty + (1 | participant_id), 
+                 data = rt_variability)
+summary(model_cv)
+
+```
+
+#Model diagnostics and effect sizes (main analysis)
+```{r}
+model <- model_log2 #simple model with log-transformed rts
+
+#confidence intervals for fixed effects and EMMs
+ci_fixed <- confint(model, method = "Wald", parm = "beta_")
+print(ci_fixed)
+
+#estimated maginal means for main effects and interaction
+emm_uncertainty <- emmeans(model, ~ uncertainty)
+emm_social <- emmeans(model, ~ social)
+emm_interaction <- emmeans(model, ~ social * uncertainty)
+
+
+#post hoc pairwise comparison
+pairs_unc <- pairs(emm_uncertainty, adjust = "tukey", infer = TRUE)
+print(pairs_unc)
+
+#effect sizes
+eta2_results <- eta_squared(model, partial = TRUE) #partial eta2 for each effect
+print(eta2_results)
+
+cohens_f2 <- eta2_results$Eta2_partial / (1 - eta2_results$Eta2_partial) #cohens f2 for each effect
+effect_sizes <- cbind(eta2_results, Cohens_f2 = cohens_f2)
+print(effect_sizes)
+
+#descriptive statistics for conditions
+descriptives <- data %>%
+  group_by(social, uncertainty) %>%
+  summarise(
+    n = n(),
+    mean_log_rt = mean(log_rt, na.rm = TRUE),
+    sd_log_rt = sd(log_rt, na.rm = TRUE),
+    mean_rt = mean(rt, na.rm = TRUE),
+    sd_rt = sd(rt, na.rm = TRUE),
+    se_rt = sd_rt / sqrt(n)
+  )
+print(descriptives)
+```
+
+#Visualisations
+```{r}
+#uncertainty effect plot
+emm_uncertainty$uncertainty <- factor(
+  emm_uncertainty$uncertainty,
+  levels = c("certain", "low", "high")
+)
+
+uncertainty_plot <- ggplot(summary(emm_uncertainty), 
+                           aes(x = uncertainty, y = emmean, color = social)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL), width = 0.2) +
+  theme_minimal() +
+  labs(
+    # title = "Main Effect of Uncertainty on Log RT",
+    y = "Estimated Marginal Mean (Log RT)",
+    x = "Uncertainty Level"
+  )
+
+print(uncertainty_plot)
+ggsave("uncertainty_plot.png", width = 6, height = 5)
+
+#interaction plot 
+emm_df <- as.data.frame(emm_interaction)
+
+emm_df$uncertainty <- factor(
+  emm_df$uncertainty,
+  levels = c("certain", "low", "high")
+)
+
+pd <- position_dodge(width = 0.1)
+
+ggplot(
+  emm_df,
+  aes(x = uncertainty, y = emmean, color = social, group = social)
+) +
+  geom_line(linewidth = 1, position = pd) +
+  geom_point(
+    size = 3,
+    position = pd
+  ) +
+  geom_errorbar(
+    aes(ymin = lower.CL, ymax = upper.CL),
+    width = 0.1,
+    position = pd
+  ) +
+  theme_minimal() +
+  labs(
+    #title = "Estimated Marginal Means: Social × Uncertainty",
+    x = "Uncertainty Level",
+    y = "Estimated Marginal Mean (Log RT)",
+    color = "Social Context"
+  ) 
+```
+
+#Exploratory analysis - RT variability
+```{r}
+model_cv <- lmer(cv_rt ~ social * uncertainty + (1 | participant_id), 
+                 data = rt_variability)
+summary(model_cv)
+anova(model_cv )
+
+#confidence intervals
+ci_fixed <- confint(model_cv, method = "Wald", parm = "beta_")
+print(ci_fixed)
+
+#effect sizes
+eta2_results <- eta_squared(model_cv, partial = TRUE)
+print(eta2_results)
+
+#estimated marginal means
+emm_cv_uncertainty <- emmeans(model_cv, ~ uncertainty)
+emm_cv_int <- emmeans(model_cv, ~ social * uncertainty)
+
+emm_cv_unc_df <- as.data.frame(emm_cv_uncertainty)
+emm_cv_int_df <- as.data.frame(emm_cv_int)
+```

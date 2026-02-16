@@ -1,0 +1,888 @@
+---
+title: "bsc_ERD_analysis"
+author: "Zofia Radwańska"
+date: "2026-02-12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+# ============================================================================
+# ERD ANALYSIS IN R - Type III ANOVA for Linear Mixed Models
+# ============================================================================
+
+#loading in packages
+install.packages("pacman")
+pacman::p_load(lme4,
+               lmerTest, #adds p values and type iii tests to lmer
+               emmeans, #for post hoc comparison
+               effectsize, #for effect sizes
+               tidyverse
+               )
+```
+
+```{r}
+
+#folder_path = "/Users/zofiaradwanska/Desktop/BScThesis/erd_data_for_r"
+#cue_alpha <- read.csv(sprintf('%s/erd_cue_alpha_C3.csv', folder_path))
+#cue_l_beta <- read.csv(sprintf('%s/erd_cue_low_beta_C3.csv', folder_path))
+#cue_h_beta <- read.csv(sprintf('%s/erd_cue_high_beta_C3.csv', folder_path))
+#move_alpha <- read.csv(sprintf('%s/erd_move_alpha_C3_Go.csv', folder_path))
+#move_l_beta <- read.csv(sprintf('%s/erd_move_low_beta_C3_Go.csv', folder_path))
+#move_h_beta <- read.csv(sprintf('%s/erd_move_high_beta_C3_Go.csv', folder_path))
+
+
+# ============================================================================
+# FUNCTION: Analyze ERD with LMM
+# ============================================================================
+
+analyze_erd_lmm <- function(data_file, event_type, band_name) {
+  
+  cat("\n", rep("=", 80), "\n", sep="")
+  cat("ANALYZING:", event_type, "-", band_name, "\n")
+  cat(rep("=", 80), "\n\n", sep="")
+  
+  # Read data
+  df <- read.csv(data_file)
+  
+  # Convert to factors with correct reference levels
+  df$participant_id <- factor(df$participant_id)
+  df$social <- factor(df$social, levels = c("Non-social", "Social"))
+  df$uncertainty <- factor(df$uncertainty, 
+                          levels = c("Certain", "Low Uncertain", "High Uncertain"))
+  df$bin_idx <- as.numeric(df$bin_idx)
+  
+  # Check if task column exists and has variation
+  has_task <- "task" %in% names(df) && length(unique(df$task)) > 1
+  
+  # Build formula
+  if (has_task) {
+    df$task <- factor(df$task, levels = c("No-go", "Go"))
+    formula <- erd_value ~ social * uncertainty * task * bin_idx + (1 | participant_id)
+  } else {
+    formula <- erd_value ~ social * uncertainty * bin_idx + (1 | participant_id)
+  }
+  
+  # Fit model
+  cat("Fitting model...\n")
+  model <- lmer(formula, data = df, REML = TRUE)
+  
+  # Type III ANOVA with Satterthwaite approximation
+  anova_result <- anova(model)
+  print(anova_result)
+  
+  # Calculate partial eta-squared
+  # Method 1: Using F-statistics from ANOVA table
+  anova_df <- as.data.frame(anova_result)
+  eta_squared_df <- effectsize::eta_squared(model, partial = TRUE, ci = 0.95)
+  
+  # Merge effect sizes with ANOVA results
+  # Match by effect name
+  anova_df$Effect <- rownames(anova_df)
+  eta_squared_df$Effect <- eta_squared_df$Parameter
+  
+  # Join the two dataframes
+  anova_df <- anova_df %>%
+    left_join(eta_squared_df %>% select(Effect, Eta2_partial, CI_low, CI_high), 
+              by = "Effect")
+  
+  # Rename for clarity
+  anova_df <- anova_df %>%
+    rename(partial_eta_sq = Eta2_partial,
+           eta_sq_CI_low = CI_low,
+           eta_sq_CI_high = CI_high)
+  
+  # Print formatted results
+  for (i in 1:nrow(anova_df)) {
+    effect_name <- anova_df[i, "Effect"]
+    f_val <- anova_df[i, "F value"]
+    p_val <- anova_df[i, "Pr(>F)"]
+    df_num <- anova_df[i, "NumDF"]
+    df_denom <- anova_df[i, "DenDF"]
+    eta_sq <- anova_df[i, "partial_eta_sq"]
+    eta_ci_low <- anova_df[i, "eta_sq_CI_low"]
+    eta_ci_high <- anova_df[i, "eta_sq_CI_high"]
+    
+    # Significance stars
+    sig <- ifelse(p_val < 0.001, "***",
+           ifelse(p_val < 0.01, "**",
+           ifelse(p_val < 0.05, "*", "")))
+    
+    # Effect size interpretation
+    interpretation <- ifelse(eta_sq < 0.01, "(negligible)",
+                      ifelse(eta_sq < 0.06, "(small)",
+                      ifelse(eta_sq < 0.14, "(medium)", "(large)")))
+    
+    cat(sprintf("%s:\n", effect_name))
+    cat(sprintf("  F(%.0f, %.2f) = %.2f, p = %.3f %s\n", 
+                df_num, df_denom, f_val, p_val, sig))
+    cat(sprintf("  Partial η² = %.3f %s\n\n", eta_sq, interpretation))
+  }
+  
+  # Return results
+  results <- list(
+    model = model,
+    anova = anova_result,
+    effect_sizes = anova_df,
+    data = df
+  )
+  
+  return(results)
+}
+```
+
+```{r}
+# ============================================================================
+# FUNCTION: Run all analyses and save results
+# ============================================================================
+
+run_all_erd_analyses <- function(data_dir = "/Users/zofiaradwanska/Desktop/BScThesis/erd_data_for_r", 
+                                 output_file = "erd_lmm_results.csv") {
+  
+  bands <- c("alpha", "low_beta", "high_beta")
+  epochs <- c("cue", "move")
+  
+  all_results <- list()
+  summary_df <- data.frame()
+  
+  for (band in bands) {
+    for (epoch in epochs) {
+      
+      # Construct filename
+      if (epoch == "cue") {
+        filename <- file.path(data_dir, sprintf("erd_%s_%s_C3.csv", epoch, band))
+      } else {
+        filename <- file.path(data_dir, sprintf("erd_%s_%s_C3_Go.csv", epoch, band))
+      }
+      
+      # Check if file exists
+      if (!file.exists(filename)) {
+        cat("WARNING: File not found:", filename, "\n\n")
+        next
+      }
+      
+      # Analyze
+      tryCatch({
+        results <- analyze_erd_lmm(filename, epoch, band)
+        
+        # Store results
+        key <- paste(epoch, band, sep = "_")
+        all_results[[key]] <- results
+        
+        # Extract effect sizes for summary
+        effect_sizes <- results$effect_sizes
+        effect_sizes$Band <- band
+        effect_sizes$Epoch <- epoch
+        effect_sizes$Effect <- rownames(effect_sizes)
+        
+        summary_df <- rbind(summary_df, effect_sizes)
+        
+      }, error = function(e) {
+        cat("ERROR analyzing", epoch, band, ":", conditionMessage(e), "\n\n")
+      })
+    }
+  }
+  
+  # Reorder columns
+  summary_df <- summary_df %>%
+    select(Band, Epoch, Effect, `F value`, NumDF, DenDF, 
+           `Pr(>F)`, partial_eta_sq, everything())
+  
+  # Save to CSV
+  write.csv(summary_df, output_file, row.names = FALSE)
+  
+  cat("\n", rep("=", 80), "\n", sep="")
+  cat("ALL ANALYSES COMPLETE\n")
+  cat(rep("=", 80), "\n", sep="")
+  cat("Results saved to:", output_file, "\n")
+  cat(rep("=", 80), "\n\n", sep="")
+  
+  return(list(
+    results = all_results,
+    summary = summary_df
+  ))
+}
+```
+
+```{r}
+# ============================================================================
+# USAGE
+# ============================================================================
+
+# Run all analyses
+all_results <- run_all_erd_analyses(
+  data_dir = "/Users/zofiaradwanska/Desktop/BScThesis/erd_data_for_r",
+  output_file = "erd_lmm_results.csv"
+)
+
+# Access individual results
+# cue_beta_results <- all_results$results$cue_low_beta
+# View(all_results$summary)
+
+# Example: Post-hoc comparisons for a specific analysis
+# emmeans(all_results$results$cue_low_beta$model, pairwise ~ uncertainty)
+```
+
+```{r}
+# ============================================================================
+# FUNCTION: Extract coefficients with 95% CI
+# ============================================================================
+
+extract_coefficients <- function(model, conf_level = 0.95) {
+  
+  cat("\n", rep("=", 80), "\n", sep="")
+  cat("FIXED EFFECTS COEFFICIENTS\n")
+  cat(rep("=", 80), "\n\n", sep="")
+  
+  # Get coefficient summary
+  coef_summary <- summary(model)$coefficients
+  
+  # Calculate confidence intervals (Wald method for speed, profile for accuracy)
+  # Wald is faster but profile is more accurate
+  ci <- confint(model, parm = "beta_", method = "Wald", level = conf_level)
+  
+  # Create dataframe
+  coef_df <- data.frame(
+    Predictor = rownames(coef_summary),
+    Beta = coef_summary[, "Estimate"],
+    SE = coef_summary[, "Std. Error"],
+    df = coef_summary[, "df"],
+    t_value = coef_summary[, "t value"],
+    p_value = coef_summary[, "Pr(>|t|)"],
+    CI_lower = ci[, 1],
+    CI_upper = ci[, 2],
+    stringsAsFactors = FALSE
+  )
+  
+  # Add significance stars
+  coef_df$sig <- ifelse(coef_df$p_value < 0.001, "***",
+                 ifelse(coef_df$p_value < 0.01, "**",
+                 ifelse(coef_df$p_value < 0.05, "*", "")))
+  
+  # Print formatted table
+  for (i in 1:nrow(coef_df)) {
+    cat(sprintf("%s:\n", coef_df$Predictor[i]))
+    cat(sprintf("  β = %.3f, SE = %.3f\n", coef_df$Beta[i], coef_df$SE[i]))
+    cat(sprintf("  95%% CI [%.3f, %.3f]\n", coef_df$CI_lower[i], coef_df$CI_upper[i]))
+    cat(sprintf("  t(%.1f) = %.2f, p = %.3f %s\n\n", 
+                coef_df$df[i], coef_df$t_value[i], coef_df$p_value[i], coef_df$sig[i]))
+  }
+  
+  return(coef_df)
+}
+```
+
+
+```{r}
+# Assuming you've run the analysis
+results <- analyze_erd_lmm("/Users/zofiaradwanska/Desktop/BScThesis/erd_data_for_r/erd_cue_low_beta_C3.csv", "cue", "high_beta")
+
+# Get the model
+model <- results$model
+
+# Get coefficients with 95% CI
+coef_table <- summary(model)$coefficients
+conf_int <- confint(model, parm = "beta_", method = "Wald")  # or method = "profile" for more accurate CIs
+
+# Combine them
+coef_df <- data.frame(
+  Predictor = rownames(coef_table),
+  Beta = coef_table[, "Estimate"],
+  SE = coef_table[, "Std. Error"],
+  df = coef_table[, "df"],
+  t = coef_table[, "t value"],
+  p = coef_table[, "Pr(>|t|)"],
+  CI_lower = conf_int[, 1],
+  CI_upper = conf_int[, 2]
+)
+
+print(coef_df)
+
+```
+
+```{r}
+# ============================================================================
+# POST-HOC PAIRWISE COMPARISONS FOR UNCERTAINTY
+# ============================================================================
+
+library(emmeans)
+library(effectsize)
+
+# Get the movement phase low beta model
+results <- analyze_erd_lmm("/Users/zofiaradwanska/Desktop/BScThesis/erd_data_for_r/erd_move_alpha_C3_Go.csv", 
+                           "move", "alpha")
+model <- results$model
+
+# 1. Marginal means for uncertainty (collapsing across social and time)
+emm_uncertainty <- emmeans(model, ~ uncertainty)
+
+cat("\n", rep("=", 80), "\n", sep="")
+cat("ESTIMATED MARGINAL MEANS: UNCERTAINTY\n")
+cat(rep("=", 80), "\n\n", sep="")
+print(emm_uncertainty)
+
+# 2. Pairwise comparisons with adjustment
+cat("\n", rep("=", 80), "\n", sep="")
+cat("PAIRWISE COMPARISONS: UNCERTAINTY LEVELS\n")
+cat(rep("=", 80), "\n\n", sep="")
+
+# Tukey adjustment (default for 3 groups)
+pairs_uncertainty <- pairs(emm_uncertainty, adjust = "tukey")
+print(pairs_uncertainty)
+
+# Get confidence intervals
+pairs_ci <- confint(pairs_uncertainty)
+print(pairs_ci)
+
+# Calculate Cohen's d for each comparison
+cat("\n", rep("=", 80), "\n", sep="")
+cat("EFFECT SIZES (Cohen's d)\n")
+cat(rep("=", 80), "\n\n", sep="")
+
+# Convert t-values to Cohen's d
+pairs_df <- as.data.frame(pairs_uncertainty)
+# d = t * sqrt(2/n) for between-subjects, but for LMM use emmeans' built-in
+eff_size <- eff_size(emm_uncertainty, sigma = sigma(model), edf = df.residual(model))
+print(eff_size)
+
+# 3. Planned contrasts based on your hypothesis
+# H: Certain < Low Uncertain < High Uncertain (in terms of ERD magnitude)
+cat("\n", rep("=", 80), "\n", sep="")
+cat("PLANNED LINEAR CONTRAST: DOSE-RESPONSE PATTERN\n")
+cat(rep("=", 80), "\n\n", sep="")
+
+# Linear trend: -1 (Certain), 0 (Low), +1 (High)
+contrast_linear <- contrast(emm_uncertainty, 
+                           list(linear = c(-1, 0, 1)),
+                           adjust = "none")  # No adjustment for planned contrast
+print(contrast_linear)
+print(confint(contrast_linear))
+```
+
+
+```{r}
+
+
+
+
+# ============================================================================
+# CREATE PROPERLY FORMATTED ANOVA TABLES (Grouped by Frequency Band)
+# ============================================================================
+
+library(tidyverse)
+
+create_anova_table_by_band <- function(results_list, epoch = "cue") {
+  
+  cat("\nCreating ANOVA table for", epoch, "epoch...\n")
+  
+  # Extract effect sizes for each band
+  bands <- c("alpha", "low_beta", "high_beta")
+  
+  all_effects <- NULL
+  
+  for (band in bands) {
+    key <- paste(epoch, band, sep = "_")
+    
+    if (key %in% names(results_list$results)) {
+      df <- results_list$results[[key]]$effect_sizes
+      
+      # Extract relevant columns
+      band_data <- data.frame(
+        Effect = df$Effect,
+        Band = band,
+        F_value = df$`F value`,
+        df_num = df$NumDF,
+        df_denom = df$DenDF,
+        p_value = df$`Pr(>F)`,
+        partial_eta_sq = df$partial_eta_sq,
+        stringsAsFactors = FALSE
+      )
+      
+      all_effects <- rbind(all_effects, band_data)
+    }
+  }
+  
+  if (is.null(all_effects)) {
+    cat("No data found for epoch:", epoch, "\n")
+    return(NULL)
+  }
+  
+  # Get unique effects (in order they appear)
+  unique_effects <- unique(all_effects$Effect)
+  
+  # Create empty data frame with proper structure
+  table_data <- data.frame(Effect = unique_effects, stringsAsFactors = FALSE)
+  
+  # Add columns for each band
+  for (band in bands) {
+    band_data <- all_effects %>% filter(Band == band)
+    
+    # Create column names
+    f_col <- paste0(band, "_F")
+    df_col <- paste0(band, "_df")
+    p_col <- paste0(band, "_p")
+    eta_col <- paste0(band, "_eta2p")
+    
+    # Match effects and add columns
+    matched_data <- band_data[match(table_data$Effect, band_data$Effect), ]
+    
+    table_data[[f_col]] <- matched_data$F_value
+    table_data[[df_col]] <- paste0(matched_data$df_num, ", ", 
+                                    sprintf("%.2f", matched_data$df_denom))
+    table_data[[p_col]] <- matched_data$p_value
+    table_data[[eta_col]] <- matched_data$partial_eta_sq
+  }
+  
+  # Format numeric values
+  for (band in bands) {
+    f_col <- paste0(band, "_F")
+    p_col <- paste0(band, "_p")
+    eta_col <- paste0(band, "_eta2p")
+    
+    # Format F-values
+    table_data[[f_col]] <- sprintf("%.2f", table_data[[f_col]])
+    
+    # Format p-values
+    table_data[[p_col]] <- sapply(table_data[[p_col]], function(p) {
+      if (is.na(p)) return("NA")
+      if (p < 0.001) return("<.001")
+      sprintf("%.3f", p)
+    })
+    
+    # Format eta-squared
+    table_data[[eta_col]] <- sapply(table_data[[eta_col]], function(eta) {
+      if (is.na(eta)) return("NA")
+      if (eta < 0.001) return("<.001")
+      sprintf("%.3f", eta)
+    })
+  }
+  
+  # Reorder columns: Effect, then all alpha cols, then all beta cols, etc.
+  col_order <- c("Effect",
+                 "alpha_F", "alpha_df", "alpha_p", "alpha_eta2p",
+                 "low_beta_F", "low_beta_df", "low_beta_p", "low_beta_eta2p",
+                 "high_beta_F", "high_beta_df", "high_beta_p", "high_beta_eta2p")
+  
+  table_data <- table_data[, col_order]
+  
+  # Rename columns for clarity
+  colnames(table_data) <- c(
+    "Effect",
+    "Alpha_F", "Alpha_df", "Alpha_p", "Alpha_η²p",
+    "Low_Beta_F", "Low_Beta_df", "Low_Beta_p", "Low_Beta_η²p",
+    "High_Beta_F", "High_Beta_df", "High_Beta_p", "High_Beta_η²p"
+  )
+  
+  cat("Table created successfully with", nrow(table_data), "effects\n")
+  
+  return(table_data)
+}
+
+# ============================================================================
+# ALTERNATIVE: More Human-Readable Format
+# ============================================================================
+
+create_anova_table_readable <- function(results_list, epoch = "cue") {
+  
+  cat("\nCreating readable ANOVA table for", epoch, "epoch...\n")
+  
+  bands <- c("alpha", "low_beta", "high_beta")
+  
+  all_effects <- NULL
+  
+  for (band in bands) {
+    key <- paste(epoch, band, sep = "_")
+    
+    if (key %in% names(results_list$results)) {
+      df <- results_list$results[[key]]$effect_sizes
+      
+      band_data <- data.frame(
+        Effect = df$Effect,
+        Band = tools::toTitleCase(gsub("_", " ", band)),
+        F_statistic = sprintf("%.2f", df$`F value`),
+        df = paste0(df$NumDF, ", ", sprintf("%.0f", df$DenDF)),
+        p_value = sapply(df$`Pr(>F)`, function(p) {
+          if (is.na(p)) return("NA")
+          if (p < 0.001) return("<.001***")
+          if (p < 0.008) return(sprintf("%.3f**", p))
+          if (p < 0.05) return(sprintf("%.3f*", p))
+          sprintf("%.3f", p)
+        }),
+        partial_eta_squared = sapply(df$partial_eta_sq, function(eta) {
+          if (is.na(eta)) return("NA")
+          if (eta < 0.001) return("<.001")
+          sprintf("%.3f", eta)
+        }),
+        stringsAsFactors = FALSE
+      )
+      
+      all_effects <- rbind(all_effects, band_data)
+    }
+  }
+  
+  # Reorder for better readability
+  all_effects <- all_effects %>%
+    arrange(Effect, Band)
+  
+  colnames(all_effects) <- c("Effect", "Frequency Band", "F", "df₁, df₂", 
+                             "p", "Partial η²")
+  
+  cat("Table created successfully with", nrow(all_effects), "rows\n")
+  
+  return(all_effects)
+}
+
+# ============================================================================
+# CREATE PUBLICATION-READY TABLE WITH GROUPED ROWS
+# ============================================================================
+
+create_publication_table <- function(results_list, epoch = "cue") {
+  
+  cat("\nCreating publication-ready table for", epoch, "epoch...\n")
+  
+  bands <- c("alpha", "low_beta", "high_beta")
+  all_data <- list()
+  
+  # Collect all data
+  for (band in bands) {
+    key <- paste(epoch, band, sep = "_")
+    if (key %in% names(results_list$results)) {
+      all_data[[band]] <- results_list$results[[key]]$effect_sizes
+    }
+  }
+  
+  # Get all unique effects
+  all_effects <- unique(all_data[[1]]$Effect)
+  
+  # Categorize effects
+  main_effects <- all_effects[!grepl(":", all_effects)]
+  two_way <- all_effects[grepl(":", all_effects) & 
+                        lengths(regmatches(all_effects, gregexpr(":", all_effects))) == 1]
+  three_way <- all_effects[grepl(":", all_effects) & 
+                          lengths(regmatches(all_effects, gregexpr(":", all_effects))) == 2]
+  four_way <- all_effects[grepl(":", all_effects) & 
+                         lengths(regmatches(all_effects, gregexpr(":", all_effects))) == 3]
+  
+  # Create organized data frame
+  organized_effects <- c(main_effects, two_way, three_way, four_way)
+  
+  # Initialize result data frame
+  result_df <- data.frame(
+    Effect_Category = character(),
+    Effect = character(),
+    stringsAsFactors = FALSE
+  )
+  
+  # Add categorized effects
+  if (length(main_effects) > 0) {
+    result_df <- rbind(result_df, 
+                      data.frame(Effect_Category = "Main Effects", 
+                                Effect = main_effects))
+  }
+  if (length(two_way) > 0) {
+    result_df <- rbind(result_df, 
+                      data.frame(Effect_Category = "Two-Way Interactions", 
+                                Effect = two_way))
+  }
+  if (length(three_way) > 0) {
+    result_df <- rbind(result_df, 
+                      data.frame(Effect_Category = "Three-Way Interactions", 
+                                Effect = three_way))
+  }
+  if (length(four_way) > 0) {
+    result_df <- rbind(result_df, 
+                      data.frame(Effect_Category = "Four-Way Interaction", 
+                                Effect = four_way))
+  }
+  
+  # Add data for each band
+  for (band in bands) {
+    band_label <- tools::toTitleCase(gsub("_", " ", band))
+    
+    if (!is.null(all_data[[band]])) {
+      df <- all_data[[band]]
+      
+      # Match effects
+      matched <- df[match(result_df$Effect, df$Effect), ]
+      
+      # Add columns
+      result_df[[paste0(band_label, "_F")]] <- sprintf("%.2f", matched$`F value`)
+      result_df[[paste0(band_label, "_df")]] <- paste0(
+        matched$NumDF, ", ", sprintf("%.0f", matched$DenDF))
+      result_df[[paste0(band_label, "_p")]] <- sapply(matched$`Pr(>F)`, function(p) {
+        if (is.na(p)) return("NA")
+        if (p < 0.001) return("<.001")
+        sprintf("%.3f", p)
+      })
+      result_df[[paste0(band_label, "_η²p")]] <- sapply(matched$partial_eta_sq, function(eta) {
+        if (is.na(eta)) return("NA")
+        if (eta < 0.001) return("<.001")
+        sprintf("%.3f", eta)
+      })
+    }
+  }
+  
+  cat("Table created with", nrow(result_df), "effects\n")
+  
+  return(result_df)
+}
+
+# ============================================================================
+# USAGE
+# ============================================================================
+
+# Option 1: Wide format (all stats by band)
+cue_table_wide <- create_anova_table_by_band(all_results, epoch = "cue")
+move_table_wide <- create_anova_table_by_band(all_results, epoch = "move")
+
+write.csv(cue_table_wide, "Table1_Cue_ANOVA_Wide.csv", row.names = FALSE)
+write.csv(move_table_wide, "Table2_Move_ANOVA_Wide.csv", row.names = FALSE)
+
+# Option 2: Long format (easier to read)
+cue_table_long <- create_anova_table_readable(all_results, epoch = "cue")
+move_table_long <- create_anova_table_readable(all_results, epoch = "move")
+
+write.csv(cue_table_long, "Table1_Cue_ANOVA_Long.csv", row.names = FALSE)
+write.csv(move_table_long, "Table2_Move_ANOVA_Long.csv", row.names = FALSE)
+
+# Option 3: Publication-ready with categorized effects
+cue_table_pub <- create_publication_table(all_results, epoch = "cue")
+move_table_pub <- create_publication_table(all_results, epoch = "move")
+
+write.csv(cue_table_pub, "Table1_Cue_ANOVA_Publication.csv", row.names = FALSE)
+write.csv(move_table_pub, "Table2_Move_ANOVA_Publication.csv", row.names = FALSE)
+
+# Print preview
+cat("\n=== CUE TABLE PREVIEW (Wide Format) ===\n")
+print(head(cue_table_wide))
+
+cat("\n=== MOVE TABLE PREVIEW (Long Format) ===\n")
+print(head(move_table_long))
+
+cat("\n=== CUE TABLE PREVIEW (Publication Format) ===\n")
+print(head(cue_table_pub))
+```
+
+```{r}
+#install.packages("gtsummary")
+library(gtsummary)
+library(gt)
+library(tidyverse)
+library(flextable)
+
+#preparing data for the table
+
+prepare_anova_for_gtsummary <- function(results_list, epoch = "cue") {
+  
+  bands <- c("alpha", "low_beta", "high_beta")
+  all_effects <- list()
+  
+  for (band in bands) {
+    key <- paste(epoch, band, sep = "_")
+    
+    if (key %in% names(results_list$results)) {
+      df <- results_list$results[[key]]$effect_sizes
+      
+      # Create formatted data
+      band_data <- data.frame(
+        Effect = df$Effect,
+        Band = case_when(
+          band == "alpha" ~ "Alpha",
+          band == "low_beta" ~ "Low Beta",
+          band == "high_beta" ~ "High Beta"
+        ),
+        F_value = df$`F value`,
+        df_num = df$NumDF,
+        df_denom = df$DenDF,
+        p_value = df$`Pr(>F)`,
+        partial_eta_sq = df$partial_eta_sq,
+        stringsAsFactors = FALSE
+      )
+      
+      all_effects[[band]] <- band_data
+    }
+  }
+  
+  # Combine all bands
+  combined <- bind_rows(all_effects)
+  
+  # Add effect categories
+  combined <- combined %>%
+    mutate(
+      Effect_Category = case_when(
+        !grepl(":", Effect) ~ "Main Effects",
+        str_count(Effect, ":") == 1 ~ "Two-Way Interactions",
+        str_count(Effect, ":") == 2 ~ "Three-Way Interactions",
+        str_count(Effect, ":") == 3 ~ "Four-Way Interaction"
+      ),
+      # Format effect names
+      Effect_Name = str_replace_all(Effect, ":", " × ")
+    )
+  
+  return(combined)
+}
+```
+
+```{r}
+create_custom_anova_table <- function(results_list, epoch = "cue") {
+  
+  # Prepare data
+  df <- prepare_anova_for_gtsummary(results_list, epoch)
+  
+  # Pivot to wide format for presentation
+  df_wide <- df %>%
+    mutate(
+      # Format values
+      F_formatted = sprintf("%.2f", F_value),
+      df_formatted = sprintf("%d, %.0f", df_num, df_denom),
+      p_formatted = case_when(
+        p_value < 0.001 ~ "<.001***",
+        p_value < 0.008 ~ sprintf("%.3f**", p_value),
+        p_value < 0.05 ~ sprintf("%.3f*", p_value),
+        TRUE ~ sprintf("%.3f", p_value)
+      ),
+      eta_formatted = ifelse(partial_eta_sq < 0.001, 
+                            "<.001", 
+                            sprintf("%.3f", partial_eta_sq))
+    ) %>%
+    select(Effect_Category, Effect_Name, Band, 
+           F_formatted, df_formatted, p_formatted, eta_formatted) %>%
+    pivot_wider(
+      names_from = Band,
+      values_from = c(F_formatted, df_formatted, p_formatted, eta_formatted),
+      names_glue = "{Band}_{.value}"
+    )
+  
+  # Create gt table
+  tbl <- df_wide %>%
+    gt(groupname_col = "Effect_Category") %>%
+    
+    # Rename columns with proper formatting
+    cols_label(
+      Effect_Name = "Effect",
+      Alpha_F_formatted = "F",
+      Alpha_df_formatted = "df",
+      Alpha_p_formatted = "p",
+      Alpha_eta_formatted = "η²ₚ",
+      `Low Beta_F_formatted` = "F",
+      `Low Beta_df_formatted` = "df",
+      `Low Beta_p_formatted` = "p",
+      `Low Beta_eta_formatted` = "η²ₚ",
+      `High Beta_F_formatted` = "F",
+      `High Beta_df_formatted` = "df",
+      `High Beta_p_formatted` = "p",
+      `High Beta_eta_formatted` = "η²ₚ"
+    ) %>%
+    
+    # Add spanning column headers
+    tab_spanner(
+      label = "Alpha Band (7-13 Hz)",
+      columns = starts_with("Alpha")
+    ) %>%
+    tab_spanner(
+      label = "Low Beta Band (13-25 Hz)",
+      columns = starts_with("Low Beta")
+    ) %>%
+    tab_spanner(
+      label = "High Beta Band (25-30 Hz)",
+      columns = starts_with("High Beta")
+    ) %>%
+    
+    # Style the table
+    tab_style(
+      style = list(
+        cell_text(weight = "bold"),
+        cell_text(style = "italic")
+      ),
+      locations = cells_column_spanners()
+    ) %>%
+    tab_style(
+      style = cell_text(weight = "bold"),
+      locations = cells_column_labels()
+    ) %>%
+    tab_style(
+      style = cell_text(style = "italic"),
+      locations = cells_row_groups()
+    ) %>%
+    
+    # Add footnote
+    tab_footnote(
+      footnote = "F = F-statistic; df = degrees of freedom (numerator, denominator); 
+                 p = p-value; η²ₚ = partial eta-squared. 
+                 *p < .05; **p < .008 (Bonferroni-corrected); ***p < .001.",
+      locations = cells_title()
+    ) %>%
+    tab_footnote(
+      footnote = paste("Models included random intercepts for participants.",
+                      ifelse(epoch == "move", "Only Go trials analyzed.", "")),
+      locations = cells_title()
+    ) %>%
+    
+    # Format options
+    tab_options(
+      table.font.size = px(12),
+      heading.title.font.size = px(16),
+      heading.subtitle.font.size = px(14),
+      row_group.font.weight = "bold",
+      column_labels.font.weight = "bold"
+    )
+  return(tbl)
+}
+```
+
+```{r}
+create_merged_bands_table <- function(results_list, epoch = "cue") {
+  
+  bands <- c("alpha", "low_beta", "high_beta")
+  band_labels <- c("Alpha Band", "Low Beta Band", "High Beta Band")
+  
+  tables <- list()
+  
+  for (i in seq_along(bands)) {
+    key <- paste(epoch, bands[i], sep = "_")
+    
+    if (key %in% names(results_list$results)) {
+      model <- results_list$results[[key]]$model
+      
+      tbl <- tbl_regression(
+        model,
+        estimate_fun = function(x) sprintf("%.2f", x),
+        pvalue_fun = function(x) style_pvalue(x, digits = 3)
+      ) %>%
+        modify_header(label ~ "**Effect**")
+      
+      tables[[band_labels[i]]] <- tbl
+    }
+  }
+  
+  # Merge tables side by side
+  if (length(tables) > 0) {
+    merged_tbl <- tbl_merge(
+      tbls = tables,
+      tab_spanner = names(tables)
+    ) %>%
+      modify_caption(paste("Linear Mixed Models -", 
+                          tools::toTitleCase(epoch), 
+                          "Epoch: All Frequency Bands"))
+    
+    return(merged_tbl)
+  }
+  
+  return(NULL)
+}
+```
+
+
+```{r}
+table_cue <- create_custom_anova_table(all_results, epoch = "cue")
+# Try the print method instead
+print(table_cue)
+
+# Or explicitly render
+gt::render_gt(table_cue)
+```
+
